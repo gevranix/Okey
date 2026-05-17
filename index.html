@@ -62,6 +62,14 @@ body::before{content:'';position:fixed;inset:0;
 .pnum{width:26px;height:26px;border-radius:50%;background:var(--bg3);border:1px solid var(--border2);
   display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:var(--accent2);flex-shrink:0;}
 .pbench{font-size:10px;color:var(--orange);margin-left:2px;}
+.psel-btn{width:100%;padding:12px 14px;border-radius:10px;background:var(--bg3);
+  border:1.5px solid var(--border2);color:var(--text);font-size:14px;font-weight:700;
+  cursor:pointer;font-family:'Nunito',sans-serif;transition:.2s;text-align:left;display:flex;align-items:center;gap:8px;}
+.psel-btn:active{transform:scale(.97);}
+.psel-btn.on{border-color:var(--accent);background:rgba(74,143,255,.12);color:var(--accent2);}
+.psel-btn .psel-badge{font-size:10px;padding:2px 6px;border-radius:4px;font-weight:700;margin-left:auto;}
+.psel-online{background:rgba(40,200,112,.12);color:var(--green);border:1px solid rgba(40,200,112,.2);}
+.psel-bench{background:rgba(96,104,128,.1);color:var(--muted2);border:1px solid var(--border);}
 .btn{width:100%;padding:14px;border-radius:12px;font-size:15px;font-weight:800;cursor:pointer;border:none;
   transition:.2s;font-family:'Nunito',sans-serif;}
 .btn:active{transform:scale(.97);}
@@ -258,7 +266,12 @@ select.inp{appearance:none;-webkit-appearance:none;padding-right:32px;
       <input class="inp" id="join-code" placeholder="ABCD" maxlength="6"
         style="text-transform:uppercase;letter-spacing:5px;text-align:center;font-size:22px;font-weight:800;margin-bottom:10px;"
         oninput="this.value=this.value.toUpperCase().replace(/\s/g,'')"/>
-      <button class="btn btn-blue" id="join-btn" onclick="joinRoom()">→ Odaya Katıl</button>
+      <button class="btn btn-ghost" style="margin-bottom:10px;" onclick="lookupRoom()">🔍 Odayı Bul</button>
+      <div id="player-select-wrap" style="display:none;">
+        <div class="lbl" style="margin-top:4px;">Ben kimim?</div>
+        <div id="player-select-list" style="display:flex;flex-direction:column;gap:7px;margin-bottom:12px;"></div>
+      </div>
+      <button class="btn btn-blue" id="join-btn" onclick="joinRoom()" style="display:none;">→ Odaya Katıl</button>
     </div>
   </div>
 </div>
@@ -275,6 +288,7 @@ select.inp{appearance:none;-webkit-appearance:none;padding-right:32px;
     <span style="color:var(--muted2);">Yazboz:</span>
     <span class="sw" id="g-writer">—</span>
     <span class="sr" id="g-round">El 1</span>
+    <span id="g-online" style="font-size:11px;color:var(--green);margin-left:6px;"></span>
   </div>
 
   <div class="page on" id="TAB-score"><div class="gbody" id="score-body"></div></div>
@@ -311,6 +325,7 @@ const db  = getDatabase(app);
 /* ══ STATE ══ */
 let G=null, myName='', roomCode='', amWriter=false;
 let curTab='score', unsubFn=null, toastTmr=null, penTarget=null;
+let joinRoomData=null; // odayı bulduktan sonra seçim için
 
 /* ══ REF ══ */
 const rRef = c => ref(db,'rooms/'+c);
@@ -320,6 +335,7 @@ const genCode = () => Math.random().toString(36).slice(2,6).toUpperCase();
 
 function setBtn(id,loading,defaultTxt){
   const b=document.getElementById(id);
+  if(!b)return;
   b.disabled=loading; b.textContent=loading?'⏳ …':defaultTxt;
 }
 
@@ -344,44 +360,92 @@ window.createRoom = async function(){
     players.push(v||'Oyuncu '+(i+1));
   }
   if(new Set(players).size!==5){toast('Oyuncu isimleri farklı olmalı');return;}
-  const totalRounds=parseInt(document.getElementById('total-rounds').value)||7;
 
+  // myName oyuncular listesinde olmalı
+  if(!players.includes(myName)){
+    toast('Adınız oyuncu listesinde olmalı');return;
+  }
+
+  const totalRounds=parseInt(document.getElementById('total-rounds').value)||7;
   setBtn('create-btn',true,'✦ Oda Oluştur');
   const code=genCode();
-  // scores[i] = toplam puan
-  // roundScores[el][i] = o elde ne yazdılar (string, cezaları içerebilir)
   const state={
     code, players, totalRounds,
     scores: Object.fromEntries(players.map((_,i)=>[i,0])),
-    roundScores: {},   // { "1": { "0":10, "1":20, ... } }
-    penalties: {},     // { "1": { "0": [{type,pts,ts}] } } ceza geçmişi
+    roundScores:{},
+    penalties:{},
     bench: players[4],
     writer: players[0],
     round: 1,
-    roundOpen: true,   // bu el girişleri kabul ediyor mu
+    roundOpen: true,
     history: [],
     gameOver: false,
+    online: {[myName]: true},   // çevrimiçi oyuncular
     ts: Date.now()
   };
   try{
     await set(rRef(code),state);
-    G=state; roomCode=code; amWriter=true;
+    G=state; roomCode=code; amWriter=(myName===G.writer);
     enterGame();
   }catch(e){ toast('Hata: '+e.message); }
   setBtn('create-btn',false,'✦ Oda Oluştur');
 };
 
+/* ══ LOOKUP ROOM (oda bul, oyuncu listesini göster) ══ */
+window.lookupRoom = async function(){
+  const code=document.getElementById('join-code').value.trim().toUpperCase();
+  if(code.length<4){toast('Geçerli kod girin');return;}
+  try{
+    const snap=await get(rRef(code));
+    if(!snap.exists()){toast('Oda bulunamadı: '+code);return;}
+    joinRoomData=snap.val();
+    // Oyuncu seçim listesini oluştur
+    const wrap=document.getElementById('player-select-wrap');
+    const list=document.getElementById('player-select-list');
+    const online=joinRoomData.online||{};
+    list.innerHTML=joinRoomData.players.map((p,i)=>{
+      const isBench=p===joinRoomData.bench;
+      const isOnline=online[p];
+      const isWriter=p===joinRoomData.writer;
+      let badgeHtml='';
+      if(isWriter) badgeHtml+=`<span class="psel-badge b-w">✍ Yazboz</span>`;
+      if(isBench)  badgeHtml+=`<span class="psel-badge psel-bench">⏸ Yedek</span>`;
+      if(isOnline) badgeHtml+=`<span class="psel-badge psel-online">● Çevrimiçi</span>`;
+      return `<button class="psel-btn" id="psel-${i}" onclick="selectPlayer('${p}',${i})">
+        ${p} ${badgeHtml}
+      </button>`;
+    }).join('');
+    wrap.style.display='block';
+    document.getElementById('join-btn').style.display='none';
+    toast('Oda bulundu — kim olduğunuzu seçin');
+  }catch(e){ toast('Hata: '+e.message); }
+};
+
+let selectedPlayerName='';
+window.selectPlayer=function(name,idx){
+  selectedPlayerName=name;
+  document.querySelectorAll('.psel-btn').forEach(b=>b.classList.remove('on'));
+  document.getElementById('psel-'+idx).classList.add('on');
+  document.getElementById('join-btn').style.display='block';
+};
+
 /* ══ JOIN ══ */
 window.joinRoom = async function(){
-  myName=document.getElementById('my-name').value.trim();
+  if(!joinRoomData){toast('Önce odayı bulun');return;}
+  if(!selectedPlayerName){toast('Listeden kendinizi seçin');return;}
+  myName=selectedPlayerName;
   const code=document.getElementById('join-code').value.trim().toUpperCase();
-  if(!myName){toast('Adınızı girin');return;}
-  if(code.length<4){toast('Geçerli kod girin');return;}
   setBtn('join-btn',true,'→ Odaya Katıl');
   try{
     const snap=await get(rRef(code));
-    if(!snap.exists()){toast('Oda bulunamadı: '+code);setBtn('join-btn',false,'→ Odaya Katıl');return;}
-    G=snap.val(); roomCode=code; amWriter=(myName===G.writer);
+    if(!snap.exists()){toast('Oda bulunamadı');setBtn('join-btn',false,'→ Odaya Katıl');return;}
+    G=snap.val();
+    roomCode=code;
+    amWriter=(myName===G.writer);
+    // Çevrimiçi olarak kaydet
+    const updated={...G, online:{...(G.online||{}), [myName]:true}, ts:Date.now()};
+    await set(rRef(code),updated);
+    G=updated;
     enterGame();
   }catch(e){ toast('Hata: '+e.message); }
   setBtn('join-btn',false,'→ Odaya Katıl');
@@ -389,6 +453,13 @@ window.joinRoom = async function(){
 
 /* ══ ENTER ══ */
 function enterGame(){
+  // Lobby'deki seçim state'ini sıfırla
+  joinRoomData=null; selectedPlayerName='';
+  const wrap=document.getElementById('player-select-wrap');
+  if(wrap)wrap.style.display='none';
+  const jbtn=document.getElementById('join-btn');
+  if(jbtn)jbtn.style.display='none';
+
   show('P-GAME'); renderAll();
   if(unsubFn){ off(rRef(roomCode)); }
   onValue(rRef(roomCode), snap=>{
@@ -401,7 +472,19 @@ function enterGame(){
   unsubFn=true;
 }
 
-window.exitGame=function(){
+window.exitGame=async function(){
+  // Çevrimdışı olarak işaretle
+  if(roomCode&&myName){
+    try{
+      const snap=await get(rRef(roomCode));
+      if(snap.exists()){
+        const g=snap.val();
+        if(g.online) delete g.online[myName];
+        g.ts=Date.now();
+        await set(rRef(roomCode),g);
+      }
+    }catch(e){}
+  }
   if(unsubFn){ off(rRef(roomCode)); unsubFn=null; }
   G=null; roomCode=''; amWriter=false;
   show('P-LOBBY');
@@ -428,9 +511,13 @@ function renderAll(){
   if(!G)return;
   document.getElementById('g-sub').textContent=`Oda: ${G.code}`;
   document.getElementById('g-code').textContent=G.code;
-  document.getElementById('g-writer').textContent=G.writer;
+  document.getElementById('g-writer').textContent=G.writer+(myName===G.writer?' (Sen)':'');
   document.getElementById('g-round').textContent=
     G.gameOver ? 'Oyun Bitti' : `El ${G.round}/${G.totalRounds}`;
+  // Online sayısı
+  const onlineCount=Object.keys(G.online||{}).length;
+  const onlineEl=document.getElementById('g-online');
+  if(onlineEl) onlineEl.textContent=onlineCount>0?`· ${onlineCount} çevrimiçi`:'';
   renderScore();
   if(curTab==='hist')renderHist();
 }
@@ -457,20 +544,22 @@ function renderScore(){
   const rows=G.players.map((p,i)=>{
     const isBench=p===G.bench;
     const isWriter=p===G.writer;
+    const isMe=p===myName;
+    const isOnline=(G.online||{})[p];
     const total=G.scores?.[i]||0;
-    const busted=G.gameOver&&false;// sadece oyun bitince
 
     const badges=[];
-    if(isWriter) badges.push(`<span class="badge b-w">✍</span>`);
-    if(isBench)  badges.push(`<span class="badge b-b">⏸</span>`);
-    else if(!isWriter) badges.push(`<span class="badge b-p">●</span>`);
+    if(isWriter) badges.push(`<span class="badge b-w">✍ Yazboz</span>`);
+    if(isBench)  badges.push(`<span class="badge b-b">⏸ Yedek</span>`);
+    else if(!isWriter) badges.push(`<span class="badge b-p">● Oynuyor</span>`);
+    if(isOnline) badges.push(`<span class="badge" style="background:rgba(40,200,112,.1);color:var(--green);border:1px solid rgba(40,200,112,.2);">🟢</span>`);
 
     const rowClass=['sr-row',isWriter?'is-writer':'',isBench?'is-bench':''].filter(Boolean).join(' ');
     const totalClass='sr-cell total'+(total>=200?' bust':total>=150?' danger':'');
 
     let cells=`<div class="sr-cell name">
       <div class="name-stack">
-        <span style="font-size:12px;font-weight:700;">${p}</span>
+        <span style="font-size:12px;font-weight:700;">${p}${isMe?' <span style="font-size:10px;color:var(--accent2);font-weight:600;">(Sen)</span>':''}</span>
         <div class="name-badges">${badges.join('')}</div>
       </div>
     </div>`;
@@ -568,10 +657,16 @@ function renderScore(){
   let handoffHtml='';
   if(amWriter){
     const others=G.players.filter(p=>p!==myName);
+    const online=G.online||{};
     handoffHtml=`<div class="hcard">
       <div class="hcard-t">✦ Yazboz Devret</div>
-      <div class="hcard-d">Masadan kalktığınızda yazboz'u masaya oturan kişiye devredin. Tüm ekranlar anında güncellenir.</div>
-      <div class="hcard-grid">${others.map(p=>`<button class="hbtn" onclick="handoff('${p}')">${p}</button>`).join('')}</div>
+      <div class="hcard-d">Masadan kalktığınızda yazboz'u masaya oturan kişiye devredin. 🟢 = şu an uygulamada açık.</div>
+      <div class="hcard-grid">${others.map(p=>{
+        const isOnline=online[p];
+        return `<button class="hbtn" onclick="handoff('${p}')">
+          ${isOnline?'🟢 ':'⚪ '}${p}
+        </button>`;
+      }).join('')}</div>
     </div>`;
   }
 
@@ -785,8 +880,13 @@ window.handoff=async function(newWriter){
   if(!confirm(`Yazboz'u ${newWriter}'a devret?`))return;
   const snap=await get(rRef(roomCode));if(!snap.exists())return;
   const g=snap.val();
-  g.writer=newWriter;g.ts=Date.now();
+  g.writer=newWriter;
+  // Eski yazboz offline, yeni yazboz online
+  if(!g.online)g.online={};
+  delete g.online[myName];
+  g.ts=Date.now();
   await set(rRef(roomCode),g);
+  amWriter=false;
   toast('Yazboz '+newWriter+"'a devredildi");
 };
 
